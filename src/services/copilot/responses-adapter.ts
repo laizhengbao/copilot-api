@@ -241,8 +241,10 @@ export const responsesResultToChatCompletion = (
   result: ResponsesResult,
   model: string,
 ): ChatCompletionResponse => {
-  if (result.status === "failed") {
-    throw new Error(result.error?.message ?? "Responses request failed")
+  if (result.status === "failed" || result.status === "cancelled") {
+    throw new Error(
+      result.error?.message ?? `Responses request ${result.status}`,
+    )
   }
 
   const { text, toolCalls } = responseItemsToMessage(result.output)

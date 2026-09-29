@@ -392,3 +392,19 @@ test("preserves usage from usage-only chat chunks", async () => {
   }
   expect(completed.response?.usage?.total_tokens).toBe(9)
 })
+
+test("rejects cancelled responses results", () => {
+  expect(() =>
+    responsesResultToChatCompletion(
+      {
+        status: "cancelled",
+        error: { message: "Request was cancelled" },
+      },
+      "gpt-test",
+    ),
+  ).toThrow("Request was cancelled")
+
+  expect(() =>
+    responsesResultToChatCompletion({ status: "cancelled" }, "gpt-test"),
+  ).toThrow("Responses request cancelled")
+})

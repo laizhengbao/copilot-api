@@ -26,6 +26,9 @@ completionsRoutes.post("/", async (c) => {
     if (state.manualApprove) await awaitApproval()
 
     const payload = await c.req.json<CompletionsPayload>()
+    if (typeof payload.model !== "string" || payload.model.length === 0) {
+      return c.json({ error: "model is required" }, 400)
+    }
 
     // legacy fill-in-the-middle engines (gpt-41-copilot, ...) live behind
     // the traditional proxy completions API; everything else is translated

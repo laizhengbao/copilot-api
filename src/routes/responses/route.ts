@@ -27,7 +27,10 @@ responseRoutes.post("/", async (c) => {
     if (state.manualApprove) await awaitApproval()
 
     const payload = await c.req.json<Record<string, unknown>>()
-    const model = typeof payload.model === "string" ? payload.model : ""
+    if (typeof payload.model !== "string" || payload.model.length === 0) {
+      return c.json({ error: "model is required" }, 400)
+    }
+    const model = payload.model
 
     // responses-native models stream straight through
     if (isResponsesCapableModel(model)) {
