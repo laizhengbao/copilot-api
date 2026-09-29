@@ -39,9 +39,12 @@ export async function handleCompletion(c: Context) {
 
   if (state.manualApprove) await awaitApproval()
 
+  // An explicitly-null max_completion_tokens still counts as "present":
+  // forwarding it together with an injected max_tokens would recreate the
+  // both-parameters rejection this guard exists to prevent.
   if (
     isNullish(payload.max_tokens)
-    && isNullish(payload.max_completion_tokens)
+    && payload.max_completion_tokens === undefined
   ) {
     payload = {
       ...payload,

@@ -43,6 +43,39 @@ export const isResponsesCapableModel = (model: string): boolean => {
   return endpoints.includes("/responses")
 }
 
+/**
+ * Derives vision / X-Initiator hints from a Responses payload so the
+ * passthrough path mirrors the chat path's header semantics.
+ */
+export const responsesPayloadHints = (
+  payload: Record<string, unknown>,
+): { vision: boolean; initiator: "user" | "agent" } => {
+  let vision = false
+  let agent = false
+
+  if (Array.isArray(payload.input)) {
+    for (const item of payload.input as Array<Record<string, unknown>>) {
+      if (
+        item.type === "function_call"
+        || item.type === "function_call_output"
+        || item.role === "assistant"
+      ) {
+        agent = true
+      }
+      if (contentHasImage(item.content)) vision = true
+    }
+  }
+
+  return { vision, initiator: agent ? "agent" : "user" }
+}
+
+const contentHasImage = (content: unknown): boolean => {
+  if (!Array.isArray(content)) return false
+  return (content as Array<Record<string, unknown>>).some(
+    (part) => part.type === "input_image",
+  )
+}
+
 // ---------- request: chat completions -> responses ----------
 
 export const chatPayloadToResponsesPayload = (
@@ -66,7 +99,13 @@ export const chatPayloadToResponsesPayload = (
   if (payload.tools?.length) {
     result.tools = payload.tools.map((tool) => chatToolToResponsesTool(tool))
     if (!isNullish(payload.tool_choice)) {
-      result.tool_choice = payload.tool_choice
+      // string values ("none" | "auto" | "required") are identical in both
+      // APIs; the object form differs: {function:{name}} -> {name}
+      const choice = payload.tool_choice
+      result.tool_choice =
+        typeof choice === "string" ? choice : (
+          { type: "function", name: choice.function.name }
+        )
     }
   }
 
@@ -203,6 +242,8 @@ export const responsesResultToChatCompletion = (
 ): ChatCompletionResponse => {
   const { text, toolCalls } = responseItemsToMessage(result.output)
 
+  const baseFinishReason = result.status === "incomplete" ? "length" : "stop"
+
   const data: ChatCompletionResponse = {
     id: result.id ?? "",
     object: "chat.completion",
@@ -217,7 +258,7 @@ export const responsesResultToChatCompletion = (
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
         logprobs: null,
-        finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        finish_reason: toolCalls.length > 0 ? "tool_calls" : baseFinishReason,
       },
     ],
   }
@@ -385,7 +426,8 @@ const completedEventToChunks = (
   const message = chatResult.choices[0].message
   const chunks: Array<ChatCompletionChunk> = []
 
-  let finishReason: ChatCompletionChunk["choices"][0]["finish_reason"] = "stop"
+  let finishReason: ChatCompletionChunk["choices"][0]["finish_reason"] =
+    result.status === "incomplete" ? "length" : "stop"
   if (message.tool_calls?.length) {
     finishReason = "tool_calls"
     chunks.push(
@@ -503,9 +545,18 @@ export const responsesPayloadToChatPayload = (
   const tools = responsesToolsToChatTools(payload.tools)
   if (tools) {
     result.tools = tools
+    // string values ("none" | "auto" | "required") are identical in both
+    // APIs; the object form differs: {name} -> {function:{name}}
     if (!isNullish(payload.tool_choice)) {
-      result.tool_choice =
-        payload.tool_choice as ChatCompletionsPayload["tool_choice"]
+      const choice = payload.tool_choice
+      if (typeof choice === "string") {
+        result.tool_choice = choice as ChatCompletionsPayload["tool_choice"]
+      } else if (typeof (choice as { name?: unknown }).name === "string") {
+        result.tool_choice = {
+          type: "function",
+          function: { name: (choice as { name: string }).name },
+        }
+      }
     }
   }
 
@@ -517,17 +568,20 @@ const appendResponsesItemToMessages = (
   item: ResponsesInputItem,
 ) => {
   if (item.type === "function_call") {
-    messages.push({
-      role: "assistant",
-      content: null,
-      tool_calls: [
-        {
-          id: item.call_id ?? "call_0",
-          type: "function",
-          function: { name: item.name ?? "", arguments: item.arguments ?? "" },
-        },
-      ],
-    })
+    // parallel tool calls arrive as consecutive function_call items and must
+    // share one assistant message: chat requires all tool results of an
+    // assistant message to follow it directly
+    const call: ToolCall = {
+      id: item.call_id ?? `call_${messages.length}`,
+      type: "function",
+      function: { name: item.name ?? "", arguments: item.arguments ?? "" },
+    }
+    const last = messages.at(-1)
+    if (last?.role === "assistant") {
+      last.tool_calls = [...(last.tool_calls ?? []), call]
+    } else {
+      messages.push({ role: "assistant", content: null, tool_calls: [call] })
+    }
     return
   }
 
@@ -573,20 +627,24 @@ const responsesContentToChatContent = (
 
 const responsesToolsToChatTools = (tools: unknown): Array<Tool> | undefined => {
   if (!Array.isArray(tools)) return undefined
-  return tools.map((tool) => {
-    const record = tool as Record<string, unknown>
-    return {
-      type: "function",
+  // only function tools have a chat equivalent; built-in tools like
+  // web_search or local_shell must not become fake "undefined" functions
+  const converted = (tools as Array<Record<string, unknown>>)
+    .filter(
+      (record) => record.type === "function" && typeof record.name === "string",
+    )
+    .map((record) => ({
+      type: "function" as const,
       function: {
-        name: String(record.name),
+        name: record.name as string,
         description:
           typeof record.description === "string" ?
             record.description
           : undefined,
         parameters: (record.parameters ?? {}) as Record<string, unknown>,
       },
-    }
-  })
+    }))
+  return converted.length > 0 ? converted : undefined
 }
 
 export const chatResultToResponsesResult = (
@@ -668,8 +726,28 @@ const collectToolCalls = (
   toolCalls: Array<ToolCall>,
 ) => {
   for (const call of choice.delta.tool_calls ?? []) {
+    // a single tool call is streamed as several deltas sharing one index:
+    // the first carries id/name, the following append argument fragments
+    const existing =
+      call.index < toolCalls.length ? toolCalls[call.index] : undefined
+    if (existing) {
+      if (call.id) existing.id = call.id
+      if (call.function?.name) existing.function.name = call.function.name
+      if (call.function?.arguments) {
+        existing.function.arguments += call.function.arguments
+      }
+      continue
+    }
+
+    while (toolCalls.length < call.index) {
+      toolCalls.push({
+        id: `call_${toolCalls.length}`,
+        type: "function",
+        function: { name: "", arguments: "" },
+      })
+    }
     toolCalls.push({
-      id: call.id ?? `call_${toolCalls.length}`,
+      id: call.id ?? `call_${call.index}`,
       type: "function",
       function: {
         name: call.function?.name ?? "",

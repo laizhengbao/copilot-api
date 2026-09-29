@@ -10,6 +10,7 @@ import {
 import {
   chatResultToResponsesResult,
   isResponsesCapableModel,
+  responsesPayloadHints,
   responsesPayloadToChatPayload,
   streamChatAsResponsesEvents,
 } from "~/services/copilot/responses-adapter"
@@ -23,7 +24,10 @@ responseRoutes.post("/", async (c) => {
 
     // responses-native models stream straight through
     if (isResponsesCapableModel(model)) {
-      const response = await createResponses(payload as ResponsesPayload)
+      const response = await createResponses(
+        payload as ResponsesPayload,
+        responsesPayloadHints(payload),
+      )
       const body = response.body
       if (!body) {
         return c.json({ error: "Empty response body" }, 502)

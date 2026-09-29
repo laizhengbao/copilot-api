@@ -38,6 +38,7 @@ export const createChatCompletions = async (
     const responsesPayload = chatPayloadToResponsesPayload(payload)
     const upstream = await createResponses(
       responsesPayload as Parameters<typeof createResponses>[0],
+      { vision: enableVision, initiator: isAgentCall ? "agent" : "user" },
     )
 
     if (payload.stream) {

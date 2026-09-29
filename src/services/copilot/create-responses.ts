@@ -11,7 +11,17 @@ export interface ResponsesPayload {
   [key: string]: unknown
 }
 
-export const createResponses = async (payload: ResponsesPayload) => {
+export interface ResponsesRequestOptions {
+  /** attach the copilot-vision-request header for image inputs */
+  vision?: boolean
+  /** mirrors the chat path's X-Initiator semantics */
+  initiator?: "user" | "agent"
+}
+
+export const createResponses = async (
+  payload: ResponsesPayload,
+  options: ResponsesRequestOptions = {},
+) => {
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const sessionHeaders = await modelSessionHeaders(payload.model)
@@ -19,7 +29,8 @@ export const createResponses = async (payload: ResponsesPayload) => {
   const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
     method: "POST",
     headers: {
-      ...copilotHeaders(state),
+      ...copilotHeaders(state, options.vision ?? false),
+      "X-Initiator": options.initiator ?? "user",
       ...sessionHeaders,
     },
     body: JSON.stringify(payload),

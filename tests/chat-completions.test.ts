@@ -111,3 +111,15 @@ test("still injects max_tokens from model limits when neither parameter is given
   const sent = lastForwardedPayload()
   expect(sent.max_tokens).toBe(4096)
 })
+
+test("explicitly-null max_completion_tokens still blocks max_tokens injection", async () => {
+  await handleCompletion(
+    makeContext({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+      max_completion_tokens: null,
+    }),
+  )
+  const sent = lastForwardedPayload()
+  expect("max_tokens" in sent).toBe(false)
+})

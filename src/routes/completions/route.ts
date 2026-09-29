@@ -40,6 +40,18 @@ completionsRoutes.post("/", async (c) => {
       return c.json(result)
     }
 
+    // array prompts are independent prompts (or FIM prefix/suffix pairs) in
+    // the legacy contract and cannot be translated to a single chat turn
+    if (Array.isArray(payload.prompt)) {
+      return c.json(
+        {
+          error:
+            "Array prompts are only supported for -copilot engine models; chat-model translation accepts a single string prompt",
+        },
+        400,
+      )
+    }
+
     const chatPayload = completionPayloadToChatPayload(payload)
 
     if (payload.stream) {

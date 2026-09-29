@@ -19,12 +19,16 @@ import {
 export const completionPayloadToChatPayload = (
   payload: CompletionsPayload,
 ): ChatCompletionsPayload => {
-  const prompt =
-    Array.isArray(payload.prompt) ? payload.prompt.join("\n") : payload.prompt
+  // Array prompts mean independent prompts (or FIM prefix/suffix pairs) in
+  // the legacy contract and cannot be represented as a single chat message;
+  // the route rejects them before we get here.
+  if (typeof payload.prompt !== "string") {
+    throw new TypeError("chat translation requires a single string prompt")
+  }
 
   const result: ChatCompletionsPayload = {
     model: payload.model,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: payload.prompt }],
   }
 
   if (!isNullish(payload.max_tokens)) result.max_tokens = payload.max_tokens
@@ -33,29 +37,33 @@ export const completionPayloadToChatPayload = (
   }
   if (!isNullish(payload.top_p)) result.top_p = payload.top_p
   if (!isNullish(payload.stop)) result.stop = payload.stop
+  if (!isNullish(payload.n)) result.n = payload.n
 
   return result
 }
 
 export const chatResultToCompletionResult = (
   chat: ChatCompletionResponse,
-): ProxyCompletionResult => {
-  const choice = chat.choices[0]
-  return {
-    id: chat.id,
-    object: "text_completion",
-    created: chat.created,
-    model: chat.model,
-    choices: [
+): ProxyCompletionResult => ({
+  id: chat.id,
+  object: "text_completion",
+  created: chat.created,
+  model: chat.model,
+  choices: chat.choices.map((choice) => ({
+    text: choice.message.content ?? "",
+    index: choice.index,
+    finish_reason: choice.finish_reason,
+    logprobs: null,
+  })),
+  usage:
+    chat.usage ?
       {
-        text: choice.message.content ?? "",
-        index: 0,
-        finish_reason: choice.finish_reason,
-        logprobs: null,
-      },
-    ],
-  }
-}
+        prompt_tokens: chat.usage.prompt_tokens,
+        completion_tokens: chat.usage.completion_tokens,
+        total_tokens: chat.usage.total_tokens,
+      }
+    : undefined,
+})
 
 export async function* streamChatAsCompletionChunks(
   chatStream: AsyncIterable<{ data?: string | null }>,
@@ -66,7 +74,6 @@ export async function* streamChatAsCompletionChunks(
     if (!event.data.startsWith("{")) break
     const chunk = JSON.parse(event.data) as ChatCompletionChunk
     if (chunk.choices.length === 0) continue
-    const choice = chunk.choices[0]
 
     yield {
       data: JSON.stringify({
@@ -74,14 +81,12 @@ export async function* streamChatAsCompletionChunks(
         object: "text_completion",
         created: chunk.created,
         model: chunk.model,
-        choices: [
-          {
-            text: choice.delta.content ?? "",
-            index: 0,
-            finish_reason: choice.finish_reason,
-            logprobs: null,
-          },
-        ],
+        choices: chunk.choices.map((choice) => ({
+          text: choice.delta.content ?? "",
+          index: choice.index,
+          finish_reason: choice.finish_reason,
+          logprobs: null,
+        })),
       }),
     }
   }

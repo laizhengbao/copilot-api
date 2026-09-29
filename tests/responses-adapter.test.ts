@@ -12,6 +12,7 @@ import {
 import {
   chatPayloadToResponsesPayload,
   isResponsesOnlyModel,
+  responsesPayloadToChatPayload,
   responsesResultToChatCompletion,
   streamResponsesAsChatChunks,
 } from "../src/services/copilot/responses-adapter"
@@ -199,4 +200,103 @@ test("createChatCompletions translates responses-only models end to end", async 
   expect(result.choices[0].message.content).toBe("PONG")
   expect(result.choices[0].finish_reason).toBe("stop")
   expect(result.usage?.prompt_tokens).toBe(3)
+})
+
+test("translates object tool_choice between both API shapes", () => {
+  const toResponses = chatPayloadToResponsesPayload({
+    model: "gpt-5.3-codex",
+    messages: [{ role: "user", content: "hi" }],
+    tools: [
+      {
+        type: "function",
+        function: { name: "greet", description: "d", parameters: {} },
+      },
+    ],
+    tool_choice: { type: "function", function: { name: "greet" } },
+  })
+  expect(toResponses.tool_choice).toEqual({ type: "function", name: "greet" })
+
+  const toChat = responsesPayloadToChatPayload({
+    model: "gpt-4.1",
+    input: "hi",
+    tools: [{ type: "function", name: "greet", parameters: {} }],
+    tool_choice: { type: "function", name: "greet" },
+  })
+  expect(toChat.tool_choice).toEqual({
+    type: "function",
+    function: { name: "greet" },
+  })
+})
+
+test("groups consecutive function_call items into one assistant message", () => {
+  const payload = responsesPayloadToChatPayload({
+    model: "gpt-4.1",
+    input: [
+      { role: "user", content: "run both" },
+      { type: "function_call", call_id: "call_1", name: "a", arguments: "{}" },
+      { type: "function_call", call_id: "call_2", name: "b", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_1", output: "1" },
+      { type: "function_call_output", call_id: "call_2", output: "2" },
+    ],
+  })
+
+  expect(payload.messages).toEqual([
+    { role: "user", content: "run both" },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "a", arguments: "{}" },
+        },
+        {
+          id: "call_2",
+          type: "function",
+          function: { name: "b", arguments: "{}" },
+        },
+      ],
+    },
+    { role: "tool", content: "1", tool_call_id: "call_1" },
+    { role: "tool", content: "2", tool_call_id: "call_2" },
+  ])
+})
+
+test("maps incomplete responses to finish_reason length", () => {
+  const result = responsesResultToChatCompletion(
+    {
+      id: "resp_x",
+      status: "incomplete",
+      output: [
+        { type: "message", content: [{ type: "output_text", text: "cut" }] },
+      ],
+    },
+    "gpt-5.3-codex",
+  )
+  expect(result.choices[0].finish_reason).toBe("length")
+})
+
+test("skips non-function tools in reverse translation", () => {
+  const payload = responsesPayloadToChatPayload({
+    model: "gpt-4.1",
+    input: "hi",
+    tools: [
+      { type: "web_search" },
+      { type: "function", name: "greet", parameters: {} },
+    ],
+  })
+  expect(payload.tools).toEqual([
+    {
+      type: "function",
+      function: { name: "greet", description: undefined, parameters: {} },
+    },
+  ])
+
+  const noFunctions = responsesPayloadToChatPayload({
+    model: "gpt-4.1",
+    input: "hi",
+    tools: [{ type: "web_search" }],
+  })
+  expect(noFunctions.tools).toBeUndefined()
 })

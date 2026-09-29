@@ -18,6 +18,13 @@ interface ModelSessionResponse {
 // Upstream session tokens live ~1h; refresh a bit early to be safe
 const SESSION_TTL_MS = 55 * 60 * 1000
 
+// When session creation fails (e.g. the account/SKU does not support it),
+// back off for a while instead of retrying on every single request
+const FAILURE_BACKOFF_MS = 5 * 60 * 1000
+
+let retryAfter = 0
+let pending: Promise<ModelSession | undefined> | undefined
+
 // The session's available_models pool is the intersection of the requested
 // hints and what the account is entitled to. Hinting every known model
 // maximizes the pool (the plain "auto" rotation is only a subset), unlocking
@@ -34,7 +41,8 @@ const modelHints = (): Array<string> => {
  * responses and messages calls for the models it lists as available.
  *
  * Best-effort: when session creation fails, requests are still sent without
- * the header so base models keep working.
+ * the header so base models keep working. Concurrent callers share one
+ * in-flight request; failures are cached for FAILURE_BACKOFF_MS.
  */
 export const ensureModelSession = async (): Promise<
   ModelSession | undefined
@@ -43,16 +51,26 @@ export const ensureModelSession = async (): Promise<
 
   const current = state.modelSession
   if (current && current.expiresAt > Date.now()) return current
+  if (Date.now() < retryAfter) return undefined
 
+  pending ??= createSession().finally(() => {
+    pending = undefined
+  })
+  return pending
+}
+
+const createSession = async (): Promise<ModelSession | undefined> => {
   try {
     const response = await fetch(`${copilotBaseUrl(state)}/models/session`, {
       method: "POST",
       headers: copilotHeaders(state),
       body: JSON.stringify({ auto_mode: { model_hints: modelHints() } }),
+      signal: AbortSignal.timeout(10_000),
     })
 
     if (!response.ok) {
       consola.warn("Model session creation failed with status", response.status)
+      retryAfter = Date.now() + FAILURE_BACKOFF_MS
       return undefined
     }
 
@@ -71,6 +89,7 @@ export const ensureModelSession = async (): Promise<
     return session
   } catch (error) {
     consola.warn("Model session creation errored:", error)
+    retryAfter = Date.now() + FAILURE_BACKOFF_MS
     return undefined
   }
 }

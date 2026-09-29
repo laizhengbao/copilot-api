@@ -23,7 +23,7 @@ export const createProxyCompletions = async (payload: CompletionsPayload) => {
 
   const base = await ensureProxyBaseUrl()
   const response = await fetch(
-    `${base}/v1/engines/${payload.model}/completions`,
+    `${base}/v1/engines/${encodeURIComponent(payload.model)}/completions`,
     {
       method: "POST",
       headers: copilotHeaders(state),
@@ -124,4 +124,9 @@ export interface ProxyCompletionResult {
     finish_reason: string
     logprobs: null
   }>
+  usage?: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+  }
 }
