@@ -1,7 +1,10 @@
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 
+import { awaitApproval } from "~/lib/approval"
 import { forwardError } from "~/lib/error"
+import { checkRateLimit } from "~/lib/rate-limit"
+import { state } from "~/lib/state"
 import {
   chatResultToCompletionResult,
   completionPayloadToChatPayload,
@@ -18,6 +21,10 @@ export const completionsRoutes = new Hono()
 
 completionsRoutes.post("/", async (c) => {
   try {
+    // same request guards as the chat route: rate limit + manual approval
+    await checkRateLimit(state)
+    if (state.manualApprove) await awaitApproval()
+
     const payload = await c.req.json<CompletionsPayload>()
 
     // legacy fill-in-the-middle engines (gpt-41-copilot, ...) live behind

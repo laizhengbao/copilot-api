@@ -11,9 +11,11 @@ import {
 } from "../src/services/copilot/create-chat-completions"
 import {
   chatPayloadToResponsesPayload,
+  chatResultToResponsesResult,
   isResponsesOnlyModel,
   responsesPayloadToChatPayload,
   responsesResultToChatCompletion,
+  streamChatAsResponsesEvents,
   streamResponsesAsChatChunks,
 } from "../src/services/copilot/responses-adapter"
 
@@ -299,4 +301,94 @@ test("skips non-function tools in reverse translation", () => {
     tools: [{ type: "web_search" }],
   })
   expect(noFunctions.tools).toBeUndefined()
+})
+
+test("throws on failed responses results instead of faking success", () => {
+  expect(() =>
+    responsesResultToChatCompletion(
+      { id: "resp_f", status: "failed", error: { message: "boom" } },
+      "gpt-5.3-codex",
+    ),
+  ).toThrow("boom")
+})
+
+test("maps chat finish_reason length to responses status incomplete", () => {
+  const result = chatResultToResponsesResult({
+    id: "chatcmpl-1",
+    object: "chat.completion",
+    created: 1,
+    model: "gpt-4.1",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: "cut off" },
+        logprobs: null,
+        finish_reason: "length",
+      },
+    ],
+  })
+  expect(result.status).toBe("incomplete")
+})
+
+test("preserves usage from usage-only chat chunks", async () => {
+  const chatChunks = [
+    {
+      data: JSON.stringify({
+        id: "c1",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-4.1",
+        choices: [
+          {
+            index: 0,
+            delta: { role: "assistant" },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      }),
+    },
+    {
+      data: JSON.stringify({
+        id: "c1",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-4.1",
+        choices: [
+          {
+            index: 0,
+            delta: { content: "hi" },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      }),
+    },
+    {
+      data: JSON.stringify({
+        id: "c1",
+        object: "chat.completion.chunk",
+        created: 1,
+        model: "gpt-4.1",
+        choices: [],
+        usage: { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9 },
+      }),
+    },
+  ]
+  const body =
+    chatChunks.map((e) => `data: ${e.data}\n\n`).join("") + `data: [DONE]\n\n`
+  const upstream = new Response(body, {
+    headers: { "content-type": "text/event-stream" },
+  })
+  const collected: Array<Record<string, unknown>> = []
+  for await (const event of streamChatAsResponsesEvents(
+    events(upstream),
+    "gpt-4.1",
+  )) {
+    collected.push(JSON.parse(event.data) as Record<string, unknown>)
+  }
+  const completed = collected.find((e) => e.type === "response.completed") as {
+    response?: { usage?: { total_tokens?: number } }
+  }
+  expect(completed.response?.usage?.total_tokens).toBe(9)
 })

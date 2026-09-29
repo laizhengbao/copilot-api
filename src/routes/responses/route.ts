@@ -1,7 +1,10 @@
 import { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 
+import { awaitApproval } from "~/lib/approval"
 import { forwardError } from "~/lib/error"
+import { checkRateLimit } from "~/lib/rate-limit"
+import { state } from "~/lib/state"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
 import {
   createResponses,
@@ -19,6 +22,10 @@ export const responseRoutes = new Hono()
 
 responseRoutes.post("/", async (c) => {
   try {
+    // same request guards as the chat route: rate limit + manual approval
+    await checkRateLimit(state)
+    if (state.manualApprove) await awaitApproval()
+
     const payload = await c.req.json<Record<string, unknown>>()
     const model = typeof payload.model === "string" ? payload.model : ""
 

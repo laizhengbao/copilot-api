@@ -218,6 +218,7 @@ export interface ResponsesResult {
   created_at?: number
   output?: Array<ResponsesOutputItem>
   usage?: ResponsesUsage
+  error?: { message?: string }
 }
 
 interface ResponsesOutputItem {
@@ -240,6 +241,10 @@ export const responsesResultToChatCompletion = (
   result: ResponsesResult,
   model: string,
 ): ChatCompletionResponse => {
+  if (result.status === "failed") {
+    throw new Error(result.error?.message ?? "Responses request failed")
+  }
+
   const { text, toolCalls } = responseItemsToMessage(result.output)
 
   const baseFinishReason = result.status === "incomplete" ? "length" : "stop"
@@ -408,11 +413,11 @@ const responsesEventToChunks = (
   }
 
   if (parsed.type === "response.failed" || parsed.type === "error") {
-    return {
-      chunks: [makeChunk(meta, { delta: {}, finish_reason: "content_filter" })],
-      done: true,
-      emittedRole,
-    }
+    // propagate upstream failures: emitting a content_filter chunk would
+    // make clients treat a failed request as a completed one
+    throw new Error(
+      parsed.response?.error?.message ?? "Responses stream failed",
+    )
   }
 
   return undefined
@@ -675,7 +680,7 @@ export const chatResultToResponsesResult = (
     object: "response",
     created_at: chat.created,
     model: chat.model,
-    status: "completed",
+    status: chatStatusFromFinishReason(choice.finish_reason),
     output,
     usage:
       chat.usage ?
@@ -687,6 +692,10 @@ export const chatResultToResponsesResult = (
       : undefined,
   }
 }
+
+// Responses clients detect max-token truncation via status "incomplete"
+const chatStatusFromFinishReason = (finishReason?: string | null): string =>
+  finishReason === "length" ? "incomplete" : "completed"
 
 interface ChatStreamState {
   responseId: string
@@ -803,7 +812,7 @@ const finalResponsesEvents = (
       id: state.responseId,
       created_at: state.created,
       model,
-      status: "completed",
+      status: chatStatusFromFinishReason(state.finishReason),
       output: responsesOutputItems(state),
       usage:
         state.usage ?
@@ -838,11 +847,12 @@ export async function* streamChatAsResponsesEvents(
     if (!event.data.startsWith("{")) break
     const chunk = JSON.parse(event.data) as ChatCompletionChunk
 
-    if (chunk.choices.length === 0) continue
-    const choice = chunk.choices[0]
-
+    // capture id/usage first: usage-only chunks carry an empty choices array
     if (chunk.id) state.responseId = chunk.id
     if (chunk.usage) state.usage = chunk.usage
+
+    if (chunk.choices.length === 0) continue
+    const choice = chunk.choices[0]
 
     if (!emittedCreated) {
       emittedCreated = true
