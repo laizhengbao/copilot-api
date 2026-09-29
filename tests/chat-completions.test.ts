@@ -69,6 +69,12 @@ const makeContext = (payload: Record<string, unknown>) =>
 beforeEach(() => {
   fetchMock.mockClear()
   state.models = { object: "list", data: [baseModel, ghostModel] }
+  // Pre-seed a valid session so no /models/session fetch happens here
+  state.modelSession = {
+    token: "test-session",
+    availableModels: [],
+    expiresAt: Date.now() + 60_000,
+  }
 })
 
 test("forwards max_completion_tokens without injecting max_tokens", async () => {
