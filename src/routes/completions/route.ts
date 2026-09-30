@@ -25,7 +25,11 @@ completionsRoutes.post("/", async (c) => {
     await checkRateLimit(state)
     if (state.manualApprove) await awaitApproval()
 
-    const payload = await c.req.json<CompletionsPayload>()
+    const body = (await c.req.json()) as unknown
+    if (typeof body !== "object" || body === null) {
+      return c.json({ error: "model is required" }, 400)
+    }
+    const payload = body as CompletionsPayload
     if (typeof payload.model !== "string" || payload.model.length === 0) {
       return c.json({ error: "model is required" }, 400)
     }

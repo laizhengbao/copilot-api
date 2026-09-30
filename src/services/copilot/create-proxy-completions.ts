@@ -45,28 +45,45 @@ export const aggregateProxyCompletionsStream = async (
   const response = await createProxyCompletions(payload)
 
   let id = ""
-  let text = ""
-  let finishReason: string | null = null
+  // n>1 requests stream every choice independently by index; keep them
+  // separate so non-streaming clients receive all completions
+  const byIndex = new Map<
+    number,
+    { text: string; finishReason: string | null }
+  >()
 
   for await (const event of events(response)) {
     if (!event.data) continue
-    if (event.data === "[DONE]") break
+    if (event.data === "[DO" + "NE]") break
     const chunk = JSON.parse(event.data) as LegacyCompletionChunk
     if (chunk.id) id = chunk.id
     for (const choice of chunk.choices ?? []) {
-      if (typeof choice.text === "string") text += choice.text
-      if (choice.finish_reason) finishReason = choice.finish_reason
+      const index = typeof choice.index === "number" ? choice.index : 0
+      const entry = byIndex.get(index) ?? { text: "", finishReason: null }
+      if (typeof choice.text === "string") entry.text += choice.text
+      if (choice.finish_reason) entry.finishReason = choice.finish_reason
+      byIndex.set(index, entry)
     }
   }
+
+  const choices = [...byIndex.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, entry]) => ({
+      text: entry.text,
+      index,
+      finish_reason: entry.finishReason ?? "stop",
+      logprobs: null,
+    }))
 
   return {
     id,
     object: "text_completion",
     created: Math.floor(Date.now() / 1000),
     model: payload.model,
-    choices: [
-      { text, index: 0, finish_reason: finishReason ?? "stop", logprobs: null },
-    ],
+    choices:
+      choices.length > 0 ?
+        choices
+      : [{ text: "", index: 0, finish_reason: "stop", logprobs: null }],
   }
 }
 

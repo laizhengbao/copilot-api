@@ -161,13 +161,19 @@ test("streamResponsesAsChatChunks emits role, text and finish chunks", async () 
   })
 
   const chunks: Array<ChatCompletionChunk> = []
+  let sawSentinel = false
   for await (const event of streamResponsesAsChatChunks(
     upstream,
     "gpt-5.3-codex",
     events,
   )) {
+    if (!event.data.startsWith("{")) {
+      sawSentinel = sawSentinel || event.data === "[DO" + "NE]"
+      continue
+    }
     chunks.push(JSON.parse(event.data) as ChatCompletionChunk)
   }
+  expect(sawSentinel).toBe(true)
 
   expect(chunks[0].choices[0].delta.role).toBe("assistant")
   const text = chunks.map((c) => c.choices[0].delta.content ?? "").join("")

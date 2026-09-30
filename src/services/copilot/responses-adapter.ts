@@ -96,6 +96,11 @@ export const chatPayloadToResponsesPayload = (
   const maxTokens = payload.max_tokens ?? payload.max_completion_tokens
   if (!isNullish(maxTokens)) result.max_output_tokens = maxTokens
 
+  // chat's JSON mode maps to the Responses text.format constraint
+  if (payload.response_format?.type === "json_object") {
+    result.text = { format: { type: "json_object" } }
+  }
+
   if (payload.tools?.length) {
     result.tools = payload.tools.map((tool) => chatToolToResponsesTool(tool))
     if (!isNullish(payload.tool_choice)) {
@@ -494,11 +499,16 @@ export async function* streamResponsesAsChatChunks(
 
     emittedRole = outcome.emittedRole
     for (const chunk of outcome.chunks) yield toSseEvent(chunk)
-    if (outcome.done) return
+    if (outcome.done) {
+      // mirror the chat route's terminator so waiting clients wrap up
+      yield { data: "[DO" + "NE]" }
+      return
+    }
   }
 
   // upstream ended without a completed event
   yield toSseEvent(makeChunk(meta, { delta: {}, finish_reason: "stop" }))
+  yield { data: "[DO" + "NE]" }
 }
 
 // ---------- reverse direction: responses -> chat completions ----------
@@ -792,29 +802,80 @@ const responsesOutputItems = (
 const finalResponsesEvents = (
   state: ChatStreamState,
   model: string,
-): Array<Record<string, unknown>> => [
-  {
-    type: "response.output_text.done",
-    output_index: 0,
-    content_index: 0,
-    text: state.text,
-  },
-  {
-    type: "response.output_item.done",
-    output_index: 0,
-    item: {
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text: state.text }],
+): Array<Record<string, unknown>> => {
+  const events: Array<Record<string, unknown>> = [
+    {
+      type: "response.output_text.done",
+      output_index: 0,
+      content_index: 0,
+      text: state.text,
     },
-  },
-  {
-    type: "response.completed",
+    {
+      type: "response.output_item.done",
+      output_index: 0,
+      item: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: state.text }],
+      },
+    },
+  ]
+
+  // chat streams only finish tool calls by the end, so their Responses item
+  // events are emitted here — before the terminal event — because Responses
+  // clients deliver function calls through output items, not only through
+  // the completed event's output array
+  let outputIndex = 1
+  for (const call of state.toolCalls) {
+    const itemIndex = outputIndex++
+    events.push(
+      {
+        type: "response.output_item.added",
+        output_index: itemIndex,
+        item: {
+          type: "function_call",
+          call_id: call.id,
+          name: call.function.name,
+          arguments: "",
+        },
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: itemIndex,
+        delta: call.function.arguments,
+      },
+      {
+        type: "response.function_call_arguments.done",
+        output_index: itemIndex,
+        arguments: call.function.arguments,
+      },
+      {
+        type: "response.output_item.done",
+        output_index: itemIndex,
+        item: {
+          type: "function_call",
+          call_id: call.id,
+          name: call.function.name,
+          arguments: call.function.arguments,
+        },
+      },
+    )
+  }
+
+  // a truncated chat stream must terminate as response.incomplete (with
+  // incomplete_details) so Responses clients do not treat it as complete
+  const status = chatStatusFromFinishReason(state.finishReason)
+  events.push({
+    type:
+      status === "incomplete" ? "response.incomplete" : "response.completed",
     response: {
       id: state.responseId,
       created_at: state.created,
       model,
-      status: chatStatusFromFinishReason(state.finishReason),
+      status,
+      ...(status === "incomplete" ?
+        { incomplete_details: { reason: "max_output_tokens" } }
+      : {}),
       output: responsesOutputItems(state),
       usage:
         state.usage ?
@@ -826,8 +887,9 @@ const finalResponsesEvents = (
         : undefined,
       finish_reason: state.finishReason ?? "stop",
     },
-  },
-]
+  })
+  return events
+}
 
 export async function* streamChatAsResponsesEvents(
   chatStream: AsyncIterable<{ data?: string | null }>,
