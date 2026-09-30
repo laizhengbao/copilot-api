@@ -87,14 +87,30 @@ export const aggregateProxyCompletionsStream = async (
   }
 }
 
-const ensureProxyBaseUrl = async (): Promise<string> => {
-  if (state.proxyBaseUrl) return state.proxyBaseUrl
+let proxyPending: Promise<string> | undefined
+// a failed lookup pins the default base only briefly, so a transient
+// /copilot_internal/user failure does not stick until restart
+const PROXY_FALLBACK_RETRY_MS = 5 * 60 * 1000
+let proxyFallbackAfter = 0
 
+const ensureProxyBaseUrl = async (): Promise<string> => {
+  const cached = state.proxyBaseUrl
+  if (cached && cached !== DEFAULT_PROXY_BASE_URL) return cached
+  if (cached && performance.now() < proxyFallbackAfter) return cached
+
+  // share one in-flight /copilot_internal/user lookup across concurrent
+  // first requests
+  proxyPending ??= resolveProxyBaseUrl().finally(() => {
+    proxyPending = undefined
+  })
+  return proxyPending
+}
+
+const resolveProxyBaseUrl = async (): Promise<string> => {
   try {
     const usage = await getCopilotUsage()
     const proxy = usage.endpoints?.proxy
     if (proxy) {
-      // eslint-disable-next-line require-atomic-updates
       state.proxyBaseUrl = proxy
       return proxy
     }
@@ -102,9 +118,16 @@ const ensureProxyBaseUrl = async (): Promise<string> => {
     consola.warn("Failed to resolve proxy base URL, using default:", error)
   }
 
-  // eslint-disable-next-line require-atomic-updates
+  proxyFallbackAfter = performance.now() + PROXY_FALLBACK_RETRY_MS
+
   state.proxyBaseUrl = DEFAULT_PROXY_BASE_URL
   return DEFAULT_PROXY_BASE_URL
+}
+
+/** Test-only: clears single-flight/backoff between tests. */
+export const __resetProxyBaseUrlForTests = (): void => {
+  proxyPending = undefined
+  proxyFallbackAfter = 0
 }
 
 export interface CompletionsPayload {

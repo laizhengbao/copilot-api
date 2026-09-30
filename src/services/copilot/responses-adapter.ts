@@ -1,3 +1,10 @@
+/*
+ * eslint max-lines: both directions of the chat<->responses protocol
+ * adapter live here on purpose so the pending upstream review sees the
+ * full conversion contract in one place; split into forward/reverse
+ * modules after it lands.
+ */
+/* eslint-disable max-lines */
 import { state } from "~/lib/state"
 import { isNullish } from "~/lib/utils"
 import {
@@ -559,6 +566,8 @@ export const responsesPayloadToChatPayload = (
   }
   if (payload.stream === true) result.stream = true
 
+  const responseFormat = responsesTextToResponseFormat(payload.text)
+  if (responseFormat) result.response_format = responseFormat
   const tools = responsesToolsToChatTools(payload.tools)
   if (tools) {
     result.tools = tools
@@ -578,6 +587,20 @@ export const responsesPayloadToChatPayload = (
   }
 
   return result
+}
+
+// Responses text.format maps back to chat's JSON mode
+const responsesTextToResponseFormat = (
+  text: unknown,
+): ChatCompletionsPayload["response_format"] | undefined => {
+  if (
+    typeof text === "object"
+    && text !== null
+    && (text as { format?: { type?: unknown } }).format?.type === "json_object"
+  ) {
+    return { type: "json_object" }
+  }
+  return undefined
 }
 
 const appendResponsesItemToMessages = (

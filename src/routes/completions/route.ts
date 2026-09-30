@@ -66,6 +66,15 @@ completionsRoutes.post("/", async (c) => {
       )
     }
 
+    // FIM suffix has no chat-completions equivalent; reject explicitly
+    // instead of silently dropping it
+    if (payload.suffix !== undefined && payload.suffix !== null) {
+      return c.json(
+        { error: "suffix is only supported for -copilot engine models" },
+        400,
+      )
+    }
+
     const chatPayload = completionPayloadToChatPayload(payload)
 
     if (payload.stream) {

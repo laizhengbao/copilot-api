@@ -7,6 +7,12 @@ export interface ModelSession {
   token: string
   availableModels: Array<string>
   expiresAt: number
+  /**
+   * The copilot token this session was created with. Sessions are scoped to
+   * the issuing token, so a session must be re-created when the copilot
+   * token rotates underneath it.
+   */
+  createdWithToken?: string
 }
 
 interface ModelSessionResponse {
@@ -50,8 +56,18 @@ export const ensureModelSession = async (): Promise<
   if (!state.copilotToken) return
 
   const current = state.modelSession
-  if (current && current.expiresAt > Date.now()) return current
-  if (Date.now() < retryAfter) return undefined
+  if (
+    current
+    && current.expiresAt > Date.now()
+    // sessions pre-seeded by tests may not record the issuing token; only
+    // treat a session as stale when a recorded token no longer matches
+    && (current.createdWithToken === undefined
+      || current.createdWithToken === state.copilotToken)
+  ) {
+    return current
+  }
+  // monotonic clock: wall-clock jumps must not extend or skip the backoff
+  if (performance.now() < retryAfter) return undefined
 
   pending ??= createSession().finally(() => {
     pending = undefined
@@ -70,7 +86,7 @@ const createSession = async (): Promise<ModelSession | undefined> => {
 
     if (!response.ok) {
       consola.warn("Model session creation failed with status", response.status)
-      retryAfter = Date.now() + FAILURE_BACKOFF_MS
+      retryAfter = performance.now() + FAILURE_BACKOFF_MS
       return undefined
     }
 
@@ -79,8 +95,9 @@ const createSession = async (): Promise<ModelSession | undefined> => {
       token: data.session_token,
       availableModels: data.available_models ?? [],
       expiresAt: Date.now() + SESSION_TTL_MS,
+      createdWithToken: state.copilotToken,
     }
-    // eslint-disable-next-line require-atomic-updates
+
     state.modelSession = session
     consola.info(
       "Model session created, unlocked models:",
@@ -89,9 +106,15 @@ const createSession = async (): Promise<ModelSession | undefined> => {
     return session
   } catch (error) {
     consola.warn("Model session creation errored:", error)
-    retryAfter = Date.now() + FAILURE_BACKOFF_MS
+    retryAfter = performance.now() + FAILURE_BACKOFF_MS
     return undefined
   }
+}
+
+/** Test-only: clears module-level backoff and in-flight state between tests. */
+export const __resetModelSessionForTests = (): void => {
+  retryAfter = 0
+  pending = undefined
 }
 
 /**

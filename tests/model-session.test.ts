@@ -8,6 +8,7 @@ import {
   type ChatCompletionsPayload,
 } from "../src/services/copilot/create-chat-completions"
 import {
+  __resetModelSessionForTests,
   ensureModelSession,
   modelSessionHeaders,
 } from "../src/services/copilot/create-model-session"
@@ -51,6 +52,8 @@ beforeEach(() => {
   fetchMock.mockClear()
   state.modelSession = undefined
   state.models = undefined
+  state.copilotToken = "test-token"
+  __resetModelSessionForTests()
 })
 
 test("creates a session and caches it", async () => {
@@ -113,4 +116,33 @@ test("createChatCompletions sends the session token for pooled models", async ()
   await createChatCompletions(payload)
   const chat = calls.find((c) => c.url.endsWith("/chat/completions"))
   expect(chat?.headers["Copilot-Session-Token"]).toBe("sess-token-123")
+})
+
+test("re-creates the session when the copilot token rotates", async () => {
+  state.copilotToken = "token-A"
+  state.modelSession = {
+    token: "old-session",
+    availableModels: ["claude-haiku-4.5"],
+    expiresAt: Date.now() + 60_000,
+    createdWithToken: "token-A",
+  }
+
+  state.copilotToken = "token-B"
+  const session = await ensureModelSession()
+
+  expect(session?.token).toBe("sess-token-123")
+  expect(session?.createdWithToken).toBe("token-B")
+  expect(calls.filter((c) => c.url.endsWith("/models/session"))).toHaveLength(1)
+})
+
+test("keeps a session without a recorded issuing token (test pre-seeds)", async () => {
+  state.modelSession = {
+    token: "seeded-session",
+    availableModels: ["claude-haiku-4.5"],
+    expiresAt: Date.now() + 60_000,
+  }
+
+  const session = await ensureModelSession()
+  expect(session?.token).toBe("seeded-session")
+  expect(calls.filter((c) => c.url.endsWith("/models/session"))).toHaveLength(0)
 })

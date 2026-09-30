@@ -414,3 +414,15 @@ test("rejects cancelled responses results", () => {
     responsesResultToChatCompletion({ status: "cancelled" }, "gpt-test"),
   ).toThrow("Responses request cancelled")
 })
+
+test("maps responses text.format json_object back to chat response_format", () => {
+  const payload = responsesPayloadToChatPayload({
+    model: "gpt-4.1",
+    input: "hi",
+    text: { format: { type: "json_object" } },
+  })
+  expect(payload.response_format).toEqual({ type: "json_object" })
+
+  const plain = responsesPayloadToChatPayload({ model: "gpt-4.1", input: "hi" })
+  expect(plain.response_format).toBeUndefined()
+})
